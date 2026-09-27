@@ -14,6 +14,7 @@ final class Admin
     {
         if (! function_exists('add_action')) return;
         add_action('admin_menu', [self::class, 'menu']);
+        add_action('load-tools_page_wp-aware-errors', [self::class, 'maybeRenderPreview']);
         add_action('admin_post_wp_aware_errors_clear_history', [self::class, 'clearHistory']);
         if (Runtime::installation()->isPlugin()) {
             add_filter('plugin_action_links_' . (function_exists('plugin_basename') ? plugin_basename(WP_AWARE_ERRORS_FILE) : 'wp-aware-errors/wp-aware-errors.php'), [self::class, 'actionLinks']);
@@ -29,7 +30,7 @@ final class Admin
     /** @param array<int,string> $links @return array<int,string> */
     public static function actionLinks(array $links): array
     {
-        if (function_exists('admin_url')) array_unshift($links, '<a href="' . esc_url(admin_url('tools.php?page=wp-aware-errors')) . '">History</a>');
+        if (function_exists('admin_url')) array_unshift($links, '<a href="' . esc_url(admin_url('tools.php?page=wp-aware-errors')) . '">Previews</a>');
         return $links;
     }
 
@@ -42,13 +43,36 @@ final class Admin
         exit;
     }
 
+    public static function maybeRenderPreview(): void
+    {
+        if (! current_user_can('manage_options')) {
+            return;
+        }
+        $raw = $_GET['preview'] ?? '';
+        $slug = is_string($raw) ? sanitize_key(wp_unslash($raw)) : '';
+        if ($slug === '' || ! ErrorPreview::has($slug)) {
+            return;
+        }
+        $frame = $_GET['frame'] ?? '';
+        $framed = is_string($frame) && wp_unslash($frame) === '1';
+        ErrorPreview::send($slug, $framed);
+        exit;
+    }
+
     public static function page(): void
     {
         if (! current_user_can('manage_options')) return;
         $history = ErrorHistory::all();
         $installation = Runtime::installation();
+        $requestedRaw = $_GET['preview'] ?? '';
+        $requested = is_string($requestedRaw) ? sanitize_key(wp_unslash($requestedRaw)) : '';
         echo '<div class="wrap"><h1>WP Aware Errors</h1>';
         echo '<p><strong>Running as:</strong> ' . esc_html($installation->label) . ' &nbsp; <strong>Version:</strong> ' . esc_html((string) WP_AWARE_ERRORS_VERSION) . '</p>';
+        if ($requested !== '' && ! ErrorPreview::has($requested)) {
+            echo '<div class="notice notice-warning"><p>That error preview does not exist.</p></div>';
+        }
+        self::previews();
+        echo '<h2>Recent errors</h2>';
         echo '<p>The history is local to this WordPress database and stores only a compact, sanitised summary of the most recent errors.</p>';
         if ($history === []) {
             echo '<div class="notice notice-info inline"><p>No captured errors yet.</p></div></div>';
@@ -64,5 +88,38 @@ final class Admin
             echo '<tr><td>' . esc_html((string) ($row['time'] ?? '')) . '</td><td><strong>' . esc_html((string) ($row['type'] ?? '')) . '</strong><br>' . esc_html((string) ($row['message'] ?? '')) . '</td><td>' . esc_html((string) ($row['source'] ?? '')) . '</td><td><code>' . esc_html((string) ($row['file'] ?? '') . ':' . (string) ($row['line'] ?? '')) . '</code></td><td>' . esc_html($request) . '</td></tr>';
         }
         echo '</tbody></table></div>';
+    }
+
+    private static function previews(): void
+    {
+        echo '<h2>Error page previews</h2>';
+        echo '<p>These are the real WP Aware Errors screens, filled with common failures. A blank white page is usually one of these fatals with nothing displayed. Open a card to view it full size. Samples are not saved to the history below.</p>';
+        echo '<style>
+.wp-aware-previews{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px;margin:16px 0 28px}
+.wp-aware-preview{position:relative;display:flex;flex-direction:column;background:#fff;border:1px solid #c3c4c7;border-radius:8px;overflow:hidden;box-shadow:0 1px 1px rgba(0,0,0,.04)}
+.wp-aware-preview:hover,.wp-aware-preview:focus-within{border-color:#ff5a36;box-shadow:0 0 0 1px #ff5a36}
+.wp-aware-preview-shot{height:230px;overflow:hidden;background:#0b0d10;pointer-events:none}
+.wp-aware-preview-shot iframe{width:1440px;height:980px;border:0;transform:scale(.22);transform-origin:top left}
+@supports (width:1cqw){.wp-aware-preview-shot{container-type:inline-size}.wp-aware-preview-shot iframe{transform:scale(calc(100cqw / 1440px))}}
+.wp-aware-preview-body{padding:12px 14px 14px}
+.wp-aware-preview-kicker{margin:0 0 4px;color:#ff5a36;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
+.wp-aware-preview-body h3{margin:0 0 6px;font-size:15px}
+.wp-aware-preview-body p{margin:0;color:#50575e}
+.wp-aware-preview-go{display:inline-block;margin-top:10px;color:#2271b1;font-weight:600}
+.wp-aware-preview:hover .wp-aware-preview-go{color:#ff5a36}
+.wp-aware-preview-link{position:absolute;inset:0;z-index:2;overflow:hidden;color:transparent}
+.wp-aware-preview-link:focus{outline:none}
+</style>';
+        echo '<div class="wp-aware-previews">';
+        foreach (ErrorPreview::catalog() as $item) {
+            $url = add_query_arg('preview', $item['slug'], admin_url('tools.php?page=wp-aware-errors'));
+            $frame = add_query_arg('frame', '1', $url);
+            echo '<article class="wp-aware-preview">';
+            echo '<div class="wp-aware-preview-shot" aria-hidden="true"><iframe src="' . esc_url($frame) . '" loading="lazy" tabindex="-1" title=""></iframe></div>';
+            echo '<div class="wp-aware-preview-body"><p class="wp-aware-preview-kicker">' . esc_html($item['kicker']) . '</p><h3>' . esc_html($item['title']) . '</h3><p>' . esc_html($item['summary']) . '</p><span class="wp-aware-preview-go">Open preview</span></div>';
+            echo '<a class="wp-aware-preview-link" target="_blank" rel="noopener noreferrer" href="' . esc_url($url) . '">Open preview: ' . esc_html($item['title']) . '</a>';
+            echo '</article>';
+        }
+        echo '</div>';
     }
 }

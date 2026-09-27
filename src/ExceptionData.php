@@ -56,6 +56,16 @@ final class ExceptionData
         );
     }
 
+    /**
+     * Build a synthetic error for admin previews. This does not record history.
+     *
+     * @param list<array<string,mixed>> $trace
+     */
+    public static function sample(string $type, string $message, string $file, int $line, array $trace): self
+    {
+        return new self($type, $message, $file, $line, $trace, gmdate('c'));
+    }
+
     public function isMemoryExhausted(): bool
     {
         return (bool) preg_match('/allowed memory size|memory exhausted/i', $this->message);
