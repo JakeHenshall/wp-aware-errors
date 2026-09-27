@@ -440,9 +440,9 @@ CODE, 'get_data()'),
         return self::scenario(
             'headers-sent',
             'Headers already sent',
-            'Redirect failed',
-            'Output started before wp_redirect()',
-            ExceptionData::sample('Error', $message, $file, $line, self::thrown($file, $line, 'example_shop_redirect_legacy')),
+            'Only if thrown',
+            'Normally a PHP warning. This screen appears only when that warning is thrown.',
+            ExceptionData::sample('ErrorException', $message, $file, $line, self::thrown($file, $line, 'example_shop_redirect_legacy')),
             self::codeAt($line, <<<'CODE'
 <?php
 add_action('template_redirect', 'example_shop_redirect_legacy');
