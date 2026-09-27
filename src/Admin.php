@@ -98,7 +98,7 @@ final class Admin
     private static function previews(): void
     {
         echo '<h2>Error page previews</h2>';
-        echo '<p>Each card is rendered by the same screen a live error uses. The code, stack, and request inside a sample are examples, not a recording from this site. Opening one still fills in this site\'s WordPress, PHP, and theme. Samples are not saved to the history below.</p>';
+        echo '<p>Each card throws a real PHP error and renders it with <a href="https://github.com/spatie/ignition" target="_blank" rel="noopener noreferrer">Spatie Ignition</a>. The stack and code are from that throw. WordPress context is added beside it. Samples are not saved to the history below.</p>';
         echo '<style>
 .wp-aware-previews{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px;margin:16px 0 28px}
 .wp-aware-preview{position:relative;display:flex;flex-direction:column;background:#fff;border:1px solid #c3c4c7;border-radius:8px;overflow:hidden;box-shadow:0 1px 1px rgba(0,0,0,.04)}
@@ -138,7 +138,7 @@ final class Admin
         if (isset($_GET['updated'])) {
             echo '<div class="notice notice-success is-dismissible"><p>Saved. Live errors and previews use this appearance.</p></div>';
         }
-        echo '<p>Dark is the default. Light is the same error screen with a light background. This does not change which errors are shown.</p>';
+        echo '<p>Dark is the default. This sets Spatie Ignition\'s theme for live errors and the previews. It does not change which errors are shown.</p>';
         echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
         wp_nonce_field('wp_aware_errors_save_settings');
         echo '<input type="hidden" name="action" value="wp_aware_errors_save_settings">';

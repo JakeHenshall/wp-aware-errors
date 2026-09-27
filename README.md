@@ -1,10 +1,16 @@
 # WP Aware Errors
 
-An Ignition-inspired, **WordPress-aware** exception debugger. One package works as a normal plugin, a theme drop-in, or an MU-plugin loader target and detects how it was loaded automatically.
+A **WordPress-aware** exception debugger that renders [Spatie Ignition](https://github.com/spatie/ignition). One package works as a normal plugin, a theme drop-in, or an MU-plugin loader target and detects how it was loaded automatically.
 
 ## Install as a plugin
 
-Upload `wp-aware-errors.zip` in **Plugins → Add New → Upload Plugin**, then activate it.
+Install dependencies, then upload the plugin:
+
+```bash
+composer install
+```
+
+`spatie/ignition` is required at runtime. Upload `wp-aware-errors.zip` in **Plugins → Add New → Upload Plugin**, then activate it. The zip must include the `vendor/` directory produced by Composer.
 
 ## Use as a theme drop-in
 
@@ -58,7 +64,7 @@ Do not expose the developer error screen to public traffic.
 
 ### Architecture
 
-The runtime is split into one PSR-4 class/interface per file under `src/`. The package ships a tiny dependency-free `autoload.php` using the same namespace mapping as `composer.json`, so WordPress installs do not require Composer at runtime.
+The runtime is split into one PSR-4 class/interface per file under `src/`. Composer installs Spatie Ignition into `vendor/`. The package also ships `autoload.php` for its own classes, using the same namespace mapping as `composer.json`.
 
 ```text
 wp-aware-errors/

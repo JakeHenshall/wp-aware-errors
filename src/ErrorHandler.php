@@ -28,7 +28,13 @@ final class ErrorHandler
 
         Runtime::markRendered();
         $data = ExceptionData::fromThrowable($exception);
-        Renderer::render($data);
+        $context = ContextCollector::collect($data);
+        ErrorHistory::store($data, $context);
+        if (IgnitionPage::available()) {
+            IgnitionPage::render($exception, $context);
+        } else {
+            Renderer::render($data);
+        }
         exit(1);
     }
 
@@ -49,7 +55,21 @@ final class ErrorHandler
         }
 
         Runtime::markRendered();
-        Renderer::render(ExceptionData::fromPhpError($error));
+        $exception = new \ErrorException(
+            (string) ($error['message'] ?? 'Unknown fatal error'),
+            0,
+            (int) ($error['type'] ?? E_ERROR),
+            (string) ($error['file'] ?? ''),
+            (int) ($error['line'] ?? 0)
+        );
+        $data = ExceptionData::fromThrowable($exception);
+        $context = ContextCollector::collect($data);
+        ErrorHistory::store($data, $context);
+        if (IgnitionPage::available()) {
+            IgnitionPage::render($exception, $context);
+        } else {
+            Renderer::render($data);
+        }
     }
 
     private static function giveHeadroom(): void
