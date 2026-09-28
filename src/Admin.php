@@ -110,10 +110,11 @@ final class Admin
 .wp-aware-preview-kicker{margin:0 0 4px;color:#ff5a36;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
 .wp-aware-preview-body h3{margin:0 0 6px;font-size:15px}
 .wp-aware-preview-body p{margin:0;color:#50575e}
-.wp-aware-preview-go{display:inline-block;margin-top:10px;color:#2271b1;font-weight:600}
-.wp-aware-preview:hover .wp-aware-preview-go{color:#ff5a36}
-.wp-aware-preview-link{position:absolute;inset:0;z-index:2;overflow:hidden;color:transparent}
-.wp-aware-preview-link:focus{outline:none}
+.wp-aware-preview-go{display:inline-flex;align-items:center;gap:6px;margin-top:12px;color:#ff5a36;font-size:13px;font-weight:600}
+.wp-aware-preview-go:after{content:"\\2192"}
+.wp-aware-preview:hover .wp-aware-preview-go,.wp-aware-preview:focus-within .wp-aware-preview-go{color:#e24a28}
+.wp-aware-preview > a.wp-aware-preview-link,.wp-aware-preview > a.wp-aware-preview-link:hover,.wp-aware-preview > a.wp-aware-preview-link:focus,.wp-aware-preview > a.wp-aware-preview-link:active{position:absolute;inset:0;z-index:2;overflow:hidden;color:transparent;background:transparent;text-decoration:none;box-shadow:none;outline:none}
+.wp-aware-preview:focus-within{outline:2px solid #ff5a36;outline-offset:2px}
 </style>';
         echo '<div class="wp-aware-previews">';
         foreach (ErrorPreview::catalog() as $item) {
@@ -122,7 +123,7 @@ final class Admin
             echo '<article class="wp-aware-preview">';
             echo '<div class="wp-aware-preview-shot' . (Settings::theme() === 'light' ? ' is-light' : '') . '" aria-hidden="true"><iframe src="' . esc_url($frame) . '" loading="lazy" tabindex="-1" title=""></iframe></div>';
             echo '<div class="wp-aware-preview-body"><p class="wp-aware-preview-kicker">' . esc_html($item['kicker']) . '</p><h3>' . esc_html($item['title']) . '</h3><p>' . esc_html($item['summary']) . '</p><span class="wp-aware-preview-go">Open preview</span></div>';
-            echo '<a class="wp-aware-preview-link" target="_blank" rel="noopener noreferrer" href="' . esc_url($url) . '">Open preview: ' . esc_html($item['title']) . '</a>';
+            echo '<a class="wp-aware-preview-link" target="_blank" rel="noopener noreferrer" href="' . esc_url($url) . '"><span class="screen-reader-text">Open preview: ' . esc_html($item['title']) . '</span></a>';
             echo '</article>';
         }
         echo '</div>';
