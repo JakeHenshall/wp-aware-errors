@@ -4,8 +4,6 @@ declare(strict_types=1);
 
 namespace Hensh\WpAwareErrors;
 
-use ReflectionFunction;
-use ReflectionMethod;
 use Throwable;
 
 final class ExceptionData
@@ -22,7 +20,7 @@ final class ExceptionData
 
     public static function fromThrowable(Throwable $exception): self
     {
-        $trace = $exception->getTrace();
+        $trace = array_slice($exception->getTrace(), 0, 100, true);
         array_unshift($trace, [
             'file' => $exception->getFile(),
             'line' => $exception->getLine(),
@@ -37,33 +35,6 @@ final class ExceptionData
             $trace,
             gmdate('c')
         );
-    }
-
-    /** @param array<string,mixed> $error */
-    public static function fromPhpError(array $error): self
-    {
-        return new self(
-            'PHP Fatal Error',
-            (string) ($error['message'] ?? 'Unknown fatal error'),
-            (string) ($error['file'] ?? ''),
-            (int) ($error['line'] ?? 0),
-            [[
-                'file' => (string) ($error['file'] ?? ''),
-                'line' => (int) ($error['line'] ?? 0),
-                'function' => '{fatal}',
-            ]],
-            gmdate('c')
-        );
-    }
-
-    /**
-     * Build a synthetic error for admin previews. This does not record history.
-     *
-     * @param list<array<string,mixed>> $trace
-     */
-    public static function sample(string $type, string $message, string $file, int $line, array $trace): self
-    {
-        return new self($type, $message, $file, $line, $trace, gmdate('c'));
     }
 
     public function isMemoryExhausted(): bool

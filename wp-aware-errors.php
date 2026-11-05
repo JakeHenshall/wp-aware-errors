@@ -3,7 +3,7 @@
  * Plugin Name: WP Aware Errors
  * Plugin URI:  https://github.com/hensh/wp-aware-errors
  * Description: WordPress context on Spatie Ignition: component ownership, hooks, compatibility, WooCommerce, solutions and local error history.
- * Version:     0.3.0
+ * Version:     0.3.2
  * Requires at least: 6.2
  * Requires PHP: 8.2
  * Author:      Hensh
@@ -17,16 +17,22 @@ if (! defined('ABSPATH')) {
     exit;
 }
 
+if (! defined('WP_AWARE_ERRORS_VERSION')) {
+    define('WP_AWARE_ERRORS_VERSION', '0.3.2');
+}
+if (! defined('WP_AWARE_ERRORS_FILE')) {
+    define('WP_AWARE_ERRORS_FILE', __FILE__);
+}
+if (! defined('WP_AWARE_ERRORS_DIR')) {
+    define('WP_AWARE_ERRORS_DIR', __DIR__);
+}
+
 if (class_exists('Hensh\\WpAwareErrors\\Bootstrap', false)) {
     return;
 }
 
-define('WP_AWARE_ERRORS_VERSION', '0.3.0');
-define('WP_AWARE_ERRORS_FILE', __FILE__);
-define('WP_AWARE_ERRORS_DIR', __DIR__);
-
 $vendor = __DIR__ . '/vendor/autoload.php';
-if (is_readable($vendor)) {
+if (! defined('WP_AWARE_ERRORS_DISABLE_COMPOSER_AUTOLOAD') && is_readable($vendor)) {
     require_once $vendor;
 }
 

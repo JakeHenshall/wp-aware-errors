@@ -4,13 +4,13 @@ declare(strict_types=1);
 
 namespace Hensh\WpAwareErrors;
 
-use ReflectionFunction;
-use ReflectionMethod;
-use Throwable;
-
 final class MissingFunctionProvider extends MessageSolutionProvider
 {
-    protected function needles(): array { return ['undefined function', 'call to undefined function']; }
+    protected function needles(): array
+    {
+        return ['undefined function'];
+    }
+
     public function provide(ExceptionData $error, array $context): array
     {
         return [[

@@ -4,15 +4,15 @@ declare(strict_types=1);
 
 namespace Hensh\WpAwareErrors;
 
-use ReflectionFunction;
-use ReflectionMethod;
 use Throwable;
 
 final class RequestInspector
 {
     public static function register(): void
     {
-        if (! function_exists('add_filter')) return;
+        if (! function_exists('add_filter')) {
+            return;
+        }
         add_filter('rest_request_before_callbacks', [self::class, 'captureRest'], PHP_INT_MIN, 3);
     }
 
@@ -25,7 +25,8 @@ final class RequestInspector
                     'rest_method' => method_exists($request, 'get_method') ? (string) $request->get_method() : '',
                     'rest_params' => method_exists($request, 'get_params') ? Sanitizer::restParams($request->get_params()) : [],
                 ]);
-            } catch (Throwable) {}
+            } catch (Throwable) {
+            }
         }
         return $response;
     }
@@ -33,8 +34,12 @@ final class RequestInspector
     public static function restRoute(): string
     {
         $runtime = Runtime::requestContext();
-        if (! empty($runtime['rest_route'])) return (string) $runtime['rest_route'];
-        if (isset($_GET['rest_route'])) return (string) $_GET['rest_route'];
+        if (! empty($runtime['rest_route'])) {
+            return (string) $runtime['rest_route'];
+        }
+        if (isset($_GET['rest_route']) && is_string($_GET['rest_route'])) {
+            return Sanitizer::value('rest_route', $_GET['rest_route']);
+        }
         $uri = (string) ($_SERVER['REQUEST_URI'] ?? '');
         $pos = strpos($uri, '/wp-json/');
         if ($pos !== false) {

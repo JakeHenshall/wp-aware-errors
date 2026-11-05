@@ -4,16 +4,13 @@ declare(strict_types=1);
 
 namespace Hensh\WpAwareErrors;
 
-use ReflectionFunction;
-use ReflectionMethod;
-use Throwable;
-
 final class CompatibilitySolutionProvider implements SolutionProvider
 {
     public function supports(ExceptionData $error, array $context): bool
     {
         return ! empty($context['compatibility']['issues']);
     }
+
     public function provide(ExceptionData $error, array $context): array
     {
         $solutions = [];
@@ -24,6 +21,7 @@ final class CompatibilitySolutionProvider implements SolutionProvider
                 'action' => 'Align the dependency/runtime versions or verify the extension against the installed version before debugging deeper.',
             ];
         }
+
         return $solutions;
     }
 }

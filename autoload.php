@@ -17,6 +17,9 @@ spl_autoload_register(static function (string $class): void {
     if ($relative === false || $relative === '' || str_contains($relative, '..')) {
         return;
     }
+    if (! preg_match('/^[A-Za-z0-9_\\\\]+$/', $relative)) {
+        return;
+    }
 
     $file = __DIR__ . '/src/' . str_replace('\\', '/', $relative) . '.php';
 

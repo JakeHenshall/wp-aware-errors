@@ -1,0 +1,11 @@
+.DS_Store
+.git
+.github
+.gitignore
+.phpunit.cache
+phpunit.xml.dist
+phpunit-integration.xml.dist
+tests
+composer.json
+composer.lock
+

@@ -4,13 +4,13 @@ declare(strict_types=1);
 
 namespace Hensh\WpAwareErrors;
 
-use ReflectionFunction;
-use ReflectionMethod;
-use Throwable;
-
 final class ParseProvider extends MessageSolutionProvider
 {
-    protected function needles(): array { return ['syntax error', 'parse error', 'unexpected token']; }
+    protected function needles(): array
+    {
+        return ['syntax error', 'parse error', 'unexpected token'];
+    }
+
     public function provide(ExceptionData $error, array $context): array
     {
         return [[

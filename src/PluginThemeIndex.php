@@ -4,10 +4,6 @@ declare(strict_types=1);
 
 namespace Hensh\WpAwareErrors;
 
-use ReflectionFunction;
-use ReflectionMethod;
-use Throwable;
-
 final class PluginThemeIndex
 {
     /** @var array<string,array<string,mixed>> */
@@ -15,21 +11,13 @@ final class PluginThemeIndex
     /** @var array<string,array<string,mixed>> */
     private static array $themes = [];
     private static bool $primed = false;
-
-    public static function primeLater(): void
-    {
-        if (function_exists('add_action')) {
-            add_action('plugins_loaded', [self::class, 'prime'], PHP_INT_MAX);
-            add_action('after_setup_theme', [self::class, 'primeThemes'], PHP_INT_MAX);
-        }
-    }
+    private static bool $themesPrimed = false;
 
     public static function prime(): void
     {
         if (self::$primed || ! defined('WP_PLUGIN_DIR')) {
             return;
         }
-        self::$primed = true;
 
         if (! function_exists('get_plugins') && defined('ABSPATH')) {
             $pluginFile = ABSPATH . 'wp-admin/includes/plugin.php';
@@ -40,6 +28,8 @@ final class PluginThemeIndex
         if (! function_exists('get_plugins')) {
             return;
         }
+
+        self::$primed = true;
 
         $active = function_exists('get_option') ? (array) get_option('active_plugins', []) : [];
         if (function_exists('is_multisite') && is_multisite() && function_exists('get_site_option')) {
@@ -70,9 +60,11 @@ final class PluginThemeIndex
 
     public static function primeThemes(): void
     {
-        if (! function_exists('wp_get_theme')) {
+        if (self::$themesPrimed || ! function_exists('wp_get_theme')) {
             return;
         }
+        self::$themesPrimed = true;
+
         $theme = wp_get_theme();
         if ($theme->exists()) {
             self::$themes[(string) $theme->get_stylesheet()] = [
@@ -92,46 +84,46 @@ final class PluginThemeIndex
     /** @return array<string,mixed>|null */
     public static function plugin(string $slug): ?array
     {
-        if (! self::$primed) self::prime();
-        return self::$plugins[$slug] ?? null;
-    }
-
-    /** @return array<string,mixed>|null */
-    public static function pluginByFile(string $file): ?array
-    {
-        if (! self::$primed) self::prime();
-        foreach (self::$plugins as $plugin) {
-            if (($plugin['file'] ?? '') === $file) return $plugin;
+        if (! self::$primed) {
+            self::prime();
         }
-        return null;
+        return self::$plugins[$slug] ?? null;
     }
 
     /** @return array<string,array<string,mixed>> */
     public static function plugins(): array
     {
-        if (! self::$primed) self::prime();
+        if (! self::$primed) {
+            self::prime();
+        }
         return self::$plugins;
     }
 
     /** @return array<string,mixed>|null */
     public static function theme(string $slug): ?array
     {
-        if (self::$themes === []) self::primeThemes();
+        if (! self::$themesPrimed) {
+            self::primeThemes();
+        }
         return self::$themes[$slug] ?? null;
     }
 
     private static function slugFromPluginFile(string $file): string
     {
-        if (str_contains($file, '/')) return explode('/', $file)[0];
+        if (str_contains($file, '/')) {
+            return explode('/', $file)[0];
+        }
         return basename($file, '.php');
     }
 
     /** @return list<string> */
     private static function parseSlugs(string $value): array
     {
-        if ($value === '') return [];
+        if ($value === '') {
+            return [];
+        }
         return array_values(array_filter(array_map(
-            static fn(string $v): string => trim($v),
+            static fn (string $v): string => trim($v),
             explode(',', $value)
         )));
     }
@@ -139,7 +131,9 @@ final class PluginThemeIndex
     /** @return array<string,string> */
     private static function extraHeaders(string $file): array
     {
-        if (! is_readable($file)) return [];
+        if (! is_readable($file)) {
+            return [];
+        }
         if (function_exists('get_file_data')) {
             $data = get_file_data($file, [
                 'WCRequires' => 'WC requires at least',
@@ -149,8 +143,12 @@ final class PluginThemeIndex
         }
         $head = (string) @file_get_contents($file, false, null, 0, 8192);
         $out = [];
-        if (preg_match('/^[ \t\/*#@]*WC requires at least:\s*(.+)$/mi', $head, $m)) $out['WCRequires'] = trim($m[1]);
-        if (preg_match('/^[ \t\/*#@]*WC tested up to:\s*(.+)$/mi', $head, $m)) $out['WCTested'] = trim($m[1]);
+        if (preg_match('/^[ \t\/*#@]*WC requires at least:\s*(.+)$/mi', $head, $m)) {
+            $out['WCRequires'] = trim($m[1]);
+        }
+        if (preg_match('/^[ \t\/*#@]*WC tested up to:\s*(.+)$/mi', $head, $m)) {
+            $out['WCTested'] = trim($m[1]);
+        }
         return $out;
     }
 }

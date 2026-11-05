@@ -14,6 +14,7 @@ final class HookRecorder
     private static bool $recording = false;
     private static bool $captureArgs = true;
     private static bool $stopped = false;
+    private static int $operations = 0;
 
     /** Hooks whose payloads are routinely huge (options trees, query results, REST bodies). */
     private const FAT_HOOKS = [
@@ -58,17 +59,27 @@ final class HookRecorder
         self::$recording = true;
         try {
             $name = function_exists('current_filter') ? (string) current_filter() : '';
+            $hookArgs = $args;
             if ($name === '' || $name === 'all') {
+                // Some WordPress paths report the aggregate hook instead of the real one.
+                $name = is_string($first) ? $first : '';
+                $hookArgs = array_slice($args, 1);
+            }
+            if ($name === '') {
                 return $first;
             }
 
-            $pressure = self::memoryPressure();
-            if ($pressure >= 2) {
-                self::$stopped = true;
-                return $first;
-            }
-            if ($pressure >= 1) {
-                self::$captureArgs = false;
+            // Checking ini_get()/memory_get_usage() on every hook is measurable overhead
+            // on hook-heavy requests, so sample the pressure every 25 hooks.
+            if ((self::$operations++ % 25) === 0) {
+                $pressure = self::memoryPressure();
+                if ($pressure >= 2) {
+                    self::$stopped = true;
+                    return $first;
+                }
+                if ($pressure >= 1) {
+                    self::$captureArgs = false;
+                }
             }
 
             $item = [
@@ -77,15 +88,15 @@ final class HookRecorder
                 'args' => [],
             ];
 
-            $wantArgs = self::$captureArgs
-                && (! defined('WP_AWARE_ERRORS_CAPTURE_HOOK_ARGUMENTS') || WP_AWARE_ERRORS_CAPTURE_HOOK_ARGUMENTS !== false)
-                && ! isset(self::FAT_HOOKS[$name]);
+            $captureEnabled = ! defined('WP_AWARE_ERRORS_CAPTURE_HOOK_ARGUMENTS')
+                || filter_var(WP_AWARE_ERRORS_CAPTURE_HOOK_ARGUMENTS, FILTER_VALIDATE_BOOLEAN);
+            $wantArgs = self::$captureArgs && $captureEnabled && ! isset(self::FAT_HOOKS[$name]);
 
             if ($wantArgs) {
-                foreach (array_slice($args, 0, 4) as $i => $arg) {
+                foreach (array_slice($hookArgs, 0, 4) as $i => $arg) {
                     $item['args']['arg' . $i] = self::summarize($arg);
                 }
-                if (count($args) > 4) {
+                if (count($hookArgs) > 4) {
                     $item['args']['…'] = '[additional arguments omitted]';
                 }
             }
@@ -129,6 +140,10 @@ final class HookRecorder
             return $value;
         }
         if (is_string($value)) {
+            if (strlen($value) > 400) {
+                $value = substr($value, 0, 400);
+            }
+            $value = Sanitizer::text($value);
             return strlen($value) > 120 ? substr($value, 0, 120) . '…' : $value;
         }
         if (is_array($value)) {
@@ -197,16 +212,15 @@ final class HookRecorder
     private static function memoryLimitBytes(): int
     {
         $raw = trim((string) ini_get('memory_limit'));
-        if ($raw === '' || $raw === '-1') {
+        if ($raw === '' || $raw === '-1' || ! preg_match('/^(\d+(?:\.\d+)?)\s*([kmg])?/i', $raw, $matches)) {
             return -1;
         }
-        $unit = strtolower(substr($raw, -1));
-        $n = (float) $raw;
-        return (int) match ($unit) {
-            'g' => $n * 1024 * 1024 * 1024,
-            'm' => $n * 1024 * 1024,
-            'k' => $n * 1024,
-            default => (int) $raw,
+        $value = (float) $matches[1];
+        return (int) match (strtolower($matches[2] ?? '')) {
+            'g' => $value * 1024 * 1024 * 1024,
+            'm' => $value * 1024 * 1024,
+            'k' => $value * 1024,
+            default => $value,
         };
     }
 }

@@ -35,7 +35,7 @@ function wp_aware_demo_undefined_method(): void
 
 function wp_aware_demo_parse_error(): void
 {
-    include __DIR__ . '/syntax-error.php';
+    include __DIR__ . '/syntax-error.php.txt';
 }
 
 function wp_aware_demo_headers_sent(): void

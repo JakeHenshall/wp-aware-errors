@@ -1,0 +1,111 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.2', '8.3', '8.4']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          tools: composer
+          coverage: none
+      - run: composer install --no-interaction --prefer-dist
+      - run: composer test
+
+  integration:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        multisite: ['0', '1']
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer
+          coverage: none
+      - run: sudo apt-get update && sudo apt-get install -y subversion
+      - run: composer install --no-interaction --prefer-dist
+      - name: Install WordPress test library
+        run: bash tests/integration/install-wp-tests.sh wordpress_test root root 127.0.0.1 latest
+        env:
+          WP_TESTS_DIR: ${{ runner.temp }}/wordpress-tests-lib
+          WP_CORE_DIR: ${{ runner.temp }}/wordpress
+      - name: Install PHPUnit 9
+        run: |
+          curl -sSL https://phar.phpunit.de/phpunit-9.phar -o "$RUNNER_TEMP/phpunit-9.phar"
+          chmod +x "$RUNNER_TEMP/phpunit-9.phar"
+      - name: Run integration tests
+        run: composer test:integration
+        env:
+          WP_TESTS_DIR: ${{ runner.temp }}/wordpress-tests-lib
+          WP_PHPUNIT_BIN: ${{ runner.temp }}/phpunit-9.phar
+          WP_TESTS_MULTISITE: ${{ matrix.multisite }}
+
+  http-smoke:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer
+          coverage: none
+      - run: sudo apt-get update && sudo apt-get install -y subversion
+      - run: composer install --no-interaction --prefer-dist
+      - name: Install WordPress core
+        run: bash tests/integration/install-wp-tests.sh wordpress_http root root 127.0.0.1 latest
+        env:
+          WP_TESTS_DIR: ${{ runner.temp }}/wordpress-tests-lib-http
+          WP_CORE_DIR: ${{ runner.temp }}/wordpress-http
+      - name: Install WP-CLI
+        run: |
+          curl -sSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o "$RUNNER_TEMP/wp-cli.phar"
+          chmod +x "$RUNNER_TEMP/wp-cli.phar"
+          sudo mv "$RUNNER_TEMP/wp-cli.phar" /usr/local/bin/wp
+      - name: Install disposable WordPress
+        run: |
+          WP_CORE_DIR="$RUNNER_TEMP/wordpress-http"
+          wp config create --path="$WP_CORE_DIR" --dbname=wordpress_http --dbuser=root --dbpass=root --dbhost=127.0.0.1
+          wp config set WP_ENVIRONMENT_TYPE "getenv('WP_ENVIRONMENT_TYPE') ?: 'local'" --raw --path="$WP_CORE_DIR"
+          wp config set WP_HOME "getenv('WP_HOME') ?: 'http://127.0.0.1:18899'" --raw --path="$WP_CORE_DIR"
+          wp config set WP_SITEURL "getenv('WP_SITEURL') ?: WP_HOME" --raw --path="$WP_CORE_DIR"
+          wp core install --path="$WP_CORE_DIR" --url=http://127.0.0.1:18899 --title='WAE HTTP Tests' --admin_user=admin --admin_password=password --admin_email=admin@example.test --skip-email
+          ln -s "$GITHUB_WORKSPACE" "$WP_CORE_DIR/wp-content/plugins/wp-aware-errors"
+          wp plugin activate wp-aware-errors --path="$WP_CORE_DIR"
+      - name: Run HTTP smoke tests
+        run: bash tests/http/run.sh "$RUNNER_TEMP/wordpress-http"

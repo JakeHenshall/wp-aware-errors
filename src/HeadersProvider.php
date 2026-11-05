@@ -4,13 +4,13 @@ declare(strict_types=1);
 
 namespace Hensh\WpAwareErrors;
 
-use ReflectionFunction;
-use ReflectionMethod;
-use Throwable;
-
 final class HeadersProvider extends MessageSolutionProvider
 {
-    protected function needles(): array { return ['headers already sent']; }
+    protected function needles(): array
+    {
+        return ['headers already sent'];
+    }
+
     public function provide(ExceptionData $error, array $context): array
     {
         return [[

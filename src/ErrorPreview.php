@@ -44,8 +44,10 @@ final class ErrorPreview
             if (! headers_sent()) {
                 status_header(500);
                 header('Content-Type: text/html; charset=UTF-8');
+                header('X-Robots-Tag: noindex, nofollow', true);
+                header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
             }
-            echo 'Spatie Ignition is not installed. From the wp-aware-errors plugin directory, run composer install.';
+            echo 'Spatie Ignition is not installed. From the wp-aware-errors directory, run composer install.';
             return;
         }
 

@@ -4,9 +4,6 @@ declare(strict_types=1);
 
 namespace Hensh\WpAwareErrors;
 
-use ReflectionFunction;
-use ReflectionMethod;
-use Throwable;
 
 final class CompatibilityInspector
 {
@@ -45,7 +42,10 @@ final class CompatibilityInspector
     {
         global $wp_version;
         $issues = [];
-        $name = (string) ($plugin['name'] ?? $plugin['slug'] ?? 'Plugin');
+        $name = (string) ($plugin['name'] ?? '');
+        if ($name === '') {
+            $name = (string) ($plugin['slug'] ?? 'Plugin');
+        }
         $wp = isset($wp_version) ? (string) $wp_version : '';
 
         $requiresPhp = (string) ($plugin['requires_php'] ?? '');

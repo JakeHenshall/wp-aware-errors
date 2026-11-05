@@ -4,13 +4,13 @@ declare(strict_types=1);
 
 namespace Hensh\WpAwareErrors;
 
-use ReflectionFunction;
-use ReflectionMethod;
-use Throwable;
-
 final class MemoryProvider extends MessageSolutionProvider
 {
-    protected function needles(): array { return ['allowed memory size', 'memory exhausted']; }
+    protected function needles(): array
+    {
+        return ['allowed memory size', 'memory exhausted'];
+    }
+
     public function provide(ExceptionData $error, array $context): array
     {
         return [[

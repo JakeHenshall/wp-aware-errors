@@ -4,10 +4,6 @@ declare(strict_types=1);
 
 namespace Hensh\WpAwareErrors;
 
-use ReflectionFunction;
-use ReflectionMethod;
-use Throwable;
-
 final class ContextCollector
 {
     /** @return array<string,mixed> */
@@ -39,7 +35,6 @@ final class ContextCollector
         return [
             'mode' => $i->mode,
             'label' => $i->label,
-            'root' => FrameClassifier::relative($i->root),
             'version' => defined('WP_AWARE_ERRORS_VERSION') ? WP_AWARE_ERRORS_VERSION : 'dev',
         ];
     }
@@ -92,7 +87,6 @@ final class ContextCollector
             'headers' => $headers,
             'ajax' => function_exists('wp_doing_ajax') ? wp_doing_ajax() : (defined('DOING_AJAX') && DOING_AJAX),
             'ajax_action' => (defined('DOING_AJAX') && DOING_AJAX) ? Sanitizer::value('action', $_REQUEST['action'] ?? '') : '',
-            'admin_post_action' => isset($_REQUEST['action']) && str_contains((string) ($_SERVER['REQUEST_URI'] ?? ''), 'admin-post.php') ? Sanitizer::value('action', $_REQUEST['action']) : '',
             'cron' => function_exists('wp_doing_cron') ? wp_doing_cron() : (defined('DOING_CRON') && DOING_CRON),
             'rest' => defined('REST_REQUEST') && REST_REQUEST,
             'rest_route' => RequestInspector::restRoute(),
@@ -111,11 +105,13 @@ final class ContextCollector
         }
         $queries = [];
         foreach (array_slice($wpdb->queries, -15) as $entry) {
-            if (! is_array($entry)) continue;
+            if (! is_array($entry)) {
+                continue;
+            }
             $queries[] = [
                 'sql' => Sanitizer::sql((string) ($entry[0] ?? '')),
                 'seconds' => isset($entry[1]) ? (float) $entry[1] : null,
-                'caller' => (string) ($entry[2] ?? ''),
+                'caller' => (string) Sanitizer::value('caller', $entry[2] ?? ''),
             ];
         }
         return ['enabled' => true, 'queries' => $queries];
@@ -125,12 +121,18 @@ final class ContextCollector
     private static function likelySource(ExceptionData $error): array
     {
         $class = FrameClassifier::classify($error->file);
-        if (($class['internal'] ?? false) === false) return $class;
-        foreach ($error->trace as $frame) {
+        if (($class['internal'] ?? false) === false) {
+            return $class;
+        }
+        foreach (array_slice($error->trace, 0, 100) as $frame) {
             $file = (string) ($frame['file'] ?? '');
-            if ($file === '') continue;
+            if ($file === '') {
+                continue;
+            }
             $candidate = FrameClassifier::classify($file);
-            if (($candidate['internal'] ?? false) === false) return $candidate;
+            if (($candidate['internal'] ?? false) === false) {
+                return $candidate;
+            }
         }
         return $class;
     }

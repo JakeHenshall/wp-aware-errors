@@ -4,9 +4,6 @@ declare(strict_types=1);
 
 namespace Hensh\WpAwareErrors;
 
-use ReflectionFunction;
-use ReflectionMethod;
-use Throwable;
 
 final class WooCommerceSolutionProvider implements SolutionProvider
 {

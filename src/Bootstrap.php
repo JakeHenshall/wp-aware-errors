@@ -4,10 +4,6 @@ declare(strict_types=1);
 
 namespace Hensh\WpAwareErrors;
 
-use ReflectionFunction;
-use ReflectionMethod;
-use Throwable;
-
 final class Bootstrap
 {
     private static bool $booted = false;
@@ -22,15 +18,20 @@ final class Bootstrap
         Runtime::setInstallation(Installation::detect($entryFile));
 
         // Metadata/admin features remain available even when the pretty renderer is gated off.
-        PluginThemeIndex::primeLater();
         Admin::register();
 
-        if (! Gate::enabled()) {
+        if (! Gate::handlingEnabled()) {
             return;
         }
 
-        HookRecorder::register();
-        RequestInspector::register();
+        // Expensive diagnostics only run when detailed output is technically
+        // possible. Production/staging without opt-in still gets a safe generic
+        // page and a correlation reference.
+        if (Gate::diagnosticsEnabled()) {
+            HookRecorder::register();
+            RequestInspector::register();
+        }
+
         ErrorHandler::register();
     }
 }

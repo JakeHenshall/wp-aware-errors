@@ -3,18 +3,32 @@
   "description": "WordPress-aware exception debugging with component ownership, hooks, compatibility intelligence and local error history.",
   "type": "wordpress-plugin",
   "license": "GPL-2.0-or-later",
-    "require": {
+  "require": {
     "php": ">=8.2",
     "spatie/ignition": "^1.16"
+  },
+  "require-dev": {
+    "phpunit/phpunit": "^11.5",
+    "yoast/phpunit-polyfills": "^3.0"
   },
   "autoload": {
     "psr-4": {
       "Hensh\\WpAwareErrors\\": "src/"
     }
   },
+  "autoload-dev": {
+    "psr-4": {
+      "Hensh\\WpAwareErrors\\Tests\\": "tests/"
+    }
+  },
+  "scripts": {
+    "test": "phpunit",
+    "test:integration": "bash tests/integration/run.sh"
+  },
   "config": {
     "platform": {
       "php": "8.2.0"
-    }
+    },
+    "sort-packages": true
   }
 }

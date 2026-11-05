@@ -4,19 +4,27 @@ declare(strict_types=1);
 
 namespace Hensh\WpAwareErrors;
 
-use ReflectionFunction;
-use ReflectionMethod;
-use Throwable;
-
 final class Renderer
 {
-    public static function render(ExceptionData $error): void
+    /** @param array<string,mixed>|null $context */
+    public static function render(ExceptionData $error, ?array $context = null, string $reference = ''): void
     {
-        $context = ContextCollector::collect($error);
-        ErrorHistory::store($error, $context);
+        if (! AccessPolicy::canViewDetails()) {
+            $kind = RequestKind::detect();
+            ErrorResponse::send(ErrorResponse::generic($kind, $reference), $kind);
+            return;
+        }
+
+        if ($context === null) {
+            try {
+                $context = ContextCollector::collect($error);
+            } catch (\Throwable) {
+                $context = [];
+            }
+        }
 
         if (PHP_SAPI === 'cli' || (defined('WP_CLI') && WP_CLI)) {
-            self::renderCli($error, $context);
+            self::renderCli($error, $context, $reference);
             return;
         }
 
@@ -28,30 +36,49 @@ final class Renderer
         }
         while (ob_get_level() > 0) @ob_end_clean();
 
-        echo self::document($error, $context);
+        echo self::document($error, $context, null, '', '', $reference);
     }
 
     /**
      * Full error-page HTML. Pass $code to supply a snippet instead of reading disk.
-     * A non-empty $previewTitle marks the page as a sample and skips nothing on its own;
-     * callers must not store history for previews.
+     * A non-empty $previewTitle adds a sample banner. The renderer never writes history.
      *
      * @param array<string,mixed>|null $context
      * @param list<array{line:int,text:string,active:bool}>|null $code
      */
-    public static function document(ExceptionData $error, ?array $context = null, ?array $code = null, string $previewTitle = '', string $previewBackUrl = ''): string
+    public static function document(ExceptionData $error, ?array $context = null, ?array $code = null, string $previewTitle = '', string $previewBackUrl = '', string $reference = ''): string
     {
-        $context ??= ContextCollector::collect($error);
+        if (! AccessPolicy::canViewDetails()) {
+            return GenericErrorPage::html($reference !== '' ? $reference : ErrorReference::generate());
+        }
+        if ($context === null) {
+            try {
+                $context = ContextCollector::collect($error);
+            } catch (\Throwable) {
+                $context = [];
+            }
+        }
         $frames = self::frames($error);
-        $code ??= SourceReader::around($error->file, $error->line);
-        $solutions = SolutionManager::solutions($error, $context);
-        $html = self::page($error, $context, $frames, $code, $solutions);
+        $sourceEnabled = $code !== null || (defined('WP_AWARE_ERRORS_SHOW_SOURCE') && Gate::toBool(WP_AWARE_ERRORS_SHOW_SOURCE));
+        if ($code === null && $sourceEnabled) {
+            $code = SourceReader::around($error->file, $error->line);
+        }
+        $code ??= [];
+        try {
+            $solutions = SolutionManager::solutions($error, $context);
+        } catch (\Throwable) {
+            $solutions = [];
+        }
+        $html = self::page($error, $context, $frames, $code, $solutions, $reference, $sourceEnabled);
         if ($previewTitle === '') {
             return $html;
         }
 
+        $safeBackUrl = function_exists('esc_url_raw')
+            ? esc_url_raw($previewBackUrl)
+            : (function_exists('esc_url') ? esc_url($previewBackUrl) : $previewBackUrl);
         $banner = '<div class="preview-banner"><div><strong>Sample preview</strong> · ' . self::e($previewTitle) . '. This is not a live error and was not saved to history.</div>'
-            . ($previewBackUrl !== '' ? '<a href="' . self::e($previewBackUrl) . '">Back to WP Aware Errors</a>' : '')
+            . ($safeBackUrl !== '' ? '<a href="' . self::e($safeBackUrl) . '">Back to WP Aware Errors</a>' : '')
             . '</div>';
         $needle = '<main class="shell">';
         $pos = strpos($html, $needle);
@@ -64,14 +91,15 @@ final class Renderer
     }
 
     /** @param array<string,mixed> $context */
-    private static function renderCli(ExceptionData $error, array $context): void
+    public static function cliText(ExceptionData $error, array $context, string $reference = ''): string
     {
         $source = (array) ($context['likely_source'] ?? []);
-        $hooks = HookRecorder::activeStack();
+        $hooks = array_slice(HookRecorder::activeStack(), -10);
         $out = "\nWP Aware Errors · " . Runtime::installation()->label . "\n" . str_repeat('=', 78) . "\n";
-        $out .= $error->type . ': ' . $error->message . "\n";
+        $out .= $error->type . ': ' . (string) Sanitizer::value('message', $error->message) . "\n";
         $out .= FrameClassifier::relative($error->file) . ':' . $error->line . "\n";
         $out .= 'Source: ' . ($source['label'] ?? 'Unknown') . "\n";
+        if ($reference !== '') $out .= 'Reference: ' . $reference . "\n";
         if ($hooks !== []) $out .= 'Hooks: ' . implode(' > ', $hooks) . "\n";
         $request = (array) ($context['request'] ?? []);
         if (! empty($request['rest_route'])) $out .= 'REST: ' . $request['rest_route'] . "\n";
@@ -80,17 +108,27 @@ final class Renderer
         foreach (array_slice(self::frames($error), 0, 15) as $index => $frame) {
             $out .= sprintf("#%d [%s] %s:%d %s\n", $index, $frame['label'], $frame['relative'], $frame['line'], $frame['call']);
         }
-        fwrite(STDERR, $out . "\n");
+        return $out . "\n";
+    }
+
+    /** @param array<string,mixed> $context */
+    private static function renderCli(ExceptionData $error, array $context, string $reference = ''): void
+    {
+        fwrite(STDERR, self::cliText($error, $context, $reference));
     }
 
     /** @return list<array<string,mixed>> */
     private static function frames(ExceptionData $error): array
     {
         $frames = [];
-        foreach ($error->trace as $index => $frame) {
+        foreach (array_slice($error->trace, 0, 100, true) as $index => $frame) {
             $file = (string) ($frame['file'] ?? '');
             $line = (int) ($frame['line'] ?? 0);
-            $classification = FrameClassifier::classify($file);
+            try {
+                $classification = FrameClassifier::classify($file);
+            } catch (\Throwable) {
+                $classification = [];
+            }
             $call = '';
             if (isset($frame['class'])) $call .= (string) $frame['class'] . (string) ($frame['type'] ?? '::');
             $call .= (string) ($frame['function'] ?? '{main}');
@@ -109,7 +147,7 @@ final class Renderer
     }
 
     /** @param array<string,mixed> $context @param list<array<string,mixed>> $frames @param list<array{line:int,text:string,active:bool}> $code @param list<array{title:string,description:string,action:string}> $solutions */
-    private static function page(ExceptionData $error, array $context, array $frames, array $code, array $solutions): string
+    private static function page(ExceptionData $error, array $context, array $frames, array $code, array $solutions, string $reference = '', bool $sourceEnabled = false): string
     {
         $source = (array) ($context['likely_source'] ?? []);
         $environment = (array) ($context['environment'] ?? []);
@@ -120,55 +158,156 @@ final class Renderer
         $compat = (array) ($context['compatibility'] ?? []);
         $installation = (array) ($context['installation'] ?? []);
 
-        $codeHtml = '';
-        foreach ($code as $row) {
-            $codeHtml .= '<div class="code-line' . ($row['active'] ? ' active' : '') . '"><span class="ln">' . $row['line'] . '</span><code>' . self::e($row['text']) . '</code></div>';
-        }
-        if ($codeHtml === '') $codeHtml = '<div class="empty pad">Source file could not be read.</div>';
+        $codeHtml = self::codeHtml($code, $sourceEnabled);
+        $framesHtml = self::framesHtml($frames);
+        $solutionsHtml = self::solutionsHtml($solutions);
+        $hookHtml = self::hooksHtml($hooks);
+        $ownershipHtml = self::ownershipHtml($hooks);
+        $compatHtml = self::compatibilityHtml($compat);
+        $queryHtml = self::queriesHtml($db);
+        $wooHtml = self::wooHtml($woo);
+        $envRows = self::environmentRows($environment);
+        $requestRows = self::requestRows($request);
 
-        $framesHtml = '';
+        $ai = self::aiPayload($error, $context, $frames, $solutions, $reference);
+        $activeHook = self::activeHook($hooks);
+        $routeLabel = (string) ($request['rest_route'] ?? '') ?: ((string) ($request['ajax_action'] ?? '') ?: '');
+        $language = function_exists('get_bloginfo') ? trim((string) get_bloginfo('language')) : '';
+        if ($language === '') {
+            $language = 'en';
+        }
+        $direction = function_exists('is_rtl') && is_rtl() ? ' dir="rtl"' : '';
+        $copyLocation = $error->file . ':' . $error->line;
+        $message = (string) Sanitizer::value('message', $error->message);
+        $scriptPayload = json_encode($ai, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_INVALID_UTF8_SUBSTITUTE | JSON_PARTIAL_OUTPUT_ON_ERROR);
+        if ($scriptPayload === false) {
+            $scriptPayload = '""';
+        }
+        $summaryMode = (string) ($installation['mode'] ?? '');
+        if ($reference !== '') {
+            $summaryMode = $summaryMode !== '' ? trim($summaryMode . ' · ' . $reference) : $reference;
+        }
+
+        return '<!doctype html><html lang="' . self::e($language) . '"' . $direction . Settings::htmlClass() . '><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' . self::e($error->type) . ' — WP Aware Errors</title>' . self::styles() . '</head><body><main class="shell">'
+            . '<header class="top"><div><div class="eyebrow">WP Aware Errors · ' . self::e((string) ($installation['label'] ?? 'Unknown')) . ' · v' . self::e((string) ($installation['version'] ?? '')) . '</div><h1>' . self::e($error->type) . '</h1><p class="message">' . self::e($message) . '</p></div><div class="top-actions"><button type="button" id="copy-ai">Copy AI context</button><button type="button" data-copy="' . self::e($copyLocation) . '" aria-label="Copy location: ' . self::e($copyLocation) . '">Copy location</button></div></header>'
+            . '<section class="summary"><div><span>Likely source</span><strong>' . self::e((string) ($source['label'] ?? 'Unknown')) . '</strong><small>' . self::e((string) ($source['kind'] ?? 'unknown')) . '</small></div><div><span>Location</span><strong>' . self::e(FrameClassifier::relative($error->file)) . ':' . $error->line . '</strong><small>' . self::e($summaryMode) . '</small></div><div><span>Current hook</span><strong>' . self::e($activeHook) . '</strong><small>' . self::e($routeLabel) . '</small></div></section>'
+            . '<section class="panel"><div class="panel-head"><h2>Code</h2><span>' . self::e(FrameClassifier::relative($error->file)) . '</span></div><div class="code">' . $codeHtml . '</div></section>'
+            . '<section class="grid"><div class="panel"><div class="panel-head"><h2>Solutions</h2><span>Provider-based</span></div><div class="panel-body">' . $solutionsHtml . '</div></div><div class="panel"><div class="panel-head"><h2>Compatibility intelligence</h2><span>WP / PHP / dependencies / Woo</span></div><div class="panel-body">' . $compatHtml . '</div></div></section>'
+            . '<section class="panel"><div class="panel-head"><h2>Stack trace</h2><span>Component ownership attached to each frame</span></div><div class="frames">' . $framesHtml . '</div></section>'
+            . '<section class="grid"><div class="panel"><div class="panel-head"><h2>Hook argument inspection</h2><span>Sanitised snapshots</span></div><div class="panel-body">' . $hookHtml . '</div></div><div class="panel"><div class="panel-head"><h2>Hook callback ownership</h2><span>Query Monitor-style component attribution</span></div><div class="panel-body ownership">' . $ownershipHtml . '</div></div></section>'
+            . '<section class="grid"><div class="panel"><div class="panel-head"><h2>Request / route</h2></div><div class="panel-body kv">' . self::rows($requestRows) . '<details><summary>GET / POST / REST params / headers</summary><pre>' . self::e(self::json(['query' => $request['query'] ?? [], 'post' => $request['post'] ?? [], 'rest_params' => $request['rest_params'] ?? [], 'headers' => $request['headers'] ?? []])) . '</pre></details></div></div><div class="panel"><div class="panel-head"><h2>WooCommerce</h2></div><div class="panel-body kv">' . $wooHtml . '</div></div></section>'
+            . '<section class="grid"><div class="panel"><div class="panel-head"><h2>Environment</h2></div><div class="panel-body kv">' . self::rows($envRows) . '</div></div><div class="panel"><div class="panel-head"><h2>Recent database queries</h2></div><div class="panel-body queries">' . $queryHtml . '</div></div></section>'
+            . '<footer>Error history is stored locally under Tools → WP Aware Errors. Never expose this renderer publicly; production display requires explicit opt-in.</footer></main>'
+            . '<span id="wp-aware-copy-status" class="screen-reader-text" role="status" aria-live="polite"></span>'
+            . '<script>window.__wpAwarePayload=' . $scriptPayload . ';(()=>{const status=document.getElementById("wp-aware-copy-status");const announce=(message)=>{if(status)status.textContent=message};const copy=async(text)=>{try{if(navigator.clipboard&&window.isSecureContext){await navigator.clipboard.writeText(text);return true}}catch(error){}try{const area=document.createElement("textarea");area.value=text;area.setAttribute("readonly","");area.style.position="fixed";area.style.opacity="0";document.body.appendChild(area);area.select();const ok=document.execCommand("copy");area.remove();return ok}catch(error){return false}};const flash=async(button,text)=>{const ok=await copy(text);const original=button.textContent;button.textContent=ok?"Copied":"Copy failed";announce(ok?"Copied to clipboard.":"Copy failed.");setTimeout(()=>{button.textContent=original},900)};document.addEventListener("click",(event)=>{const target=event.target instanceof Element?event.target:null;const button=target?target.closest("[data-copy]"):null;if(button)flash(button,button.dataset.copy||"")});document.getElementById("copy-ai")?.addEventListener("click",(event)=>flash(event.currentTarget,window.__wpAwarePayload||""))})();</script></body></html>';
+    }
+
+    /** @param list<array{line:int,text:string,active:bool}> $code */
+    private static function codeHtml(array $code, bool $sourceEnabled = false): string
+    {
+        $html = '';
+        foreach ($code as $row) {
+            $active = ! empty($row['active']);
+            $html .= '<div class="code-line' . ($active ? ' active' : '') . '"' . ($active ? ' aria-current="true"' : '') . '><span class="ln">' . (int) $row['line'] . '</span><code>' . self::e((string) $row['text']) . '</code></div>';
+        }
+
+        if ($html !== '') {
+            return $html;
+        }
+
+        return $sourceEnabled
+            ? '<div class="empty pad">Source file could not be read.</div>'
+            : '<div class="empty pad">Source display is disabled. Define WP_AWARE_ERRORS_SHOW_SOURCE=true to enable it for authorised administrators.</div>';
+    }
+
+    /** @param list<array<string,mixed>> $frames */
+    private static function framesHtml(array $frames): string
+    {
+        $html = '';
         foreach ($frames as $frame) {
             $classes = 'frame kind-' . self::e((string) $frame['kind']) . ($frame['internal'] ? ' internal' : ' app-frame');
             $path = (string) $frame['file'];
             $line = (int) $frame['line'];
             $cursor = $path !== '' ? 'cursor://file/' . rawurlencode($path) . ':' . $line : '#';
             $vscode = $path !== '' ? 'vscode://file/' . rawurlencode($path) . ':' . $line : '#';
-            $framesHtml .= '<div class="' . $classes . '"><div class="frame-no">#' . (int) $frame['index'] . '</div><div class="frame-main"><div class="frame-call">' . self::e((string) $frame['call']) . '</div><div class="frame-path">' . self::e((string) $frame['relative']) . ($line > 0 ? ':' . $line : '') . '</div></div><div class="badge">' . self::e((string) $frame['label']) . '</div>' . ($path !== '' ? '<div class="frame-actions"><a href="' . self::e($cursor) . '">Cursor</a><a href="' . self::e($vscode) . '">VS Code</a><button data-copy="' . self::e($path . ':' . $line) . '">Copy</button></div>' : '') . '</div>';
+            $copyPath = $path . ':' . $line;
+            $html .= '<div class="' . $classes . '"><div class="frame-no">#' . (int) $frame['index'] . '</div><div class="frame-main"><div class="frame-call">' . self::e((string) $frame['call']) . '</div><div class="frame-path">' . self::e((string) $frame['relative']) . ($line > 0 ? ':' . $line : '') . '</div></div><div class="badge">' . self::e((string) $frame['label']) . '</div>' . ($path !== '' ? '<div class="frame-actions"><a href="' . self::e($cursor) . '">Cursor</a><a href="' . self::e($vscode) . '">VS Code</a><button type="button" data-copy="' . self::e($copyPath) . '" aria-label="Copy path: ' . self::e($copyPath) . '">Copy</button></div>' : '') . '</div>';
         }
 
-        $solutionsHtml = '';
+        return $html;
+    }
+
+    /** @param list<array{title:string,description:string,action:string}> $solutions */
+    private static function solutionsHtml(array $solutions): string
+    {
+        $html = '';
         foreach ($solutions as $solution) {
-            $solutionsHtml .= '<div class="solution"><strong>' . self::e($solution['title']) . '</strong><p>' . self::e($solution['description']) . '</p><small>' . self::e($solution['action']) . '</small></div>';
+            $title = (string) Sanitizer::text((string) $solution['title']);
+            $description = (string) Sanitizer::text((string) $solution['description']);
+            $action = (string) Sanitizer::text((string) $solution['action']);
+            $html .= '<div class="solution"><strong>' . self::e($title) . '</strong><p>' . self::e($description) . '</p><small>' . self::e($action) . '</small></div>';
         }
-        if ($solutionsHtml === '') $solutionsHtml = '<div class="empty">No high-confidence solution provider matched this error.</div>';
 
-        $hookHtml = '';
+        return $html === '' ? '<div class="empty">No high-confidence solution provider matched this error.</div>' : $html;
+    }
+
+    /** @param array<string,mixed> $hooks */
+    private static function hooksHtml(array $hooks): string
+    {
+        $html = '';
         foreach (array_slice((array) ($hooks['recent'] ?? []), -8) as $hook) {
             $args = (array) ($hook['args'] ?? []);
-            $hookHtml .= '<details class="hook"><summary><span>' . self::e((string) ($hook['name'] ?? '')) . '</span><small>' . count($args) . ' args captured</small></summary><pre>' . self::e(self::json($args)) . '</pre></details>';
+            $html .= '<details class="hook"><summary><span>' . self::e((string) ($hook['name'] ?? '')) . '</span><small>' . count($args) . ' args captured</small></summary><pre>' . self::e(self::json($args)) . '</pre></details>';
         }
-        if ($hookHtml === '') $hookHtml = '<div class="empty">No hooks captured before the error.</div>';
 
-        $ownershipHtml = '';
+        return $html === '' ? '<div class="empty">No hooks captured before the error.</div>' : $html;
+    }
+
+    /** @param array<string,mixed> $hooks */
+    private static function ownershipHtml(array $hooks): string
+    {
+        $html = '';
         foreach ((array) ($hooks['ownership'] ?? []) as $owner) {
-            $ownershipHtml .= '<div class="owner"><span>' . self::e((string) ($owner['hook'] ?? '')) . '</span><code>' . self::e((string) ($owner['callback'] ?? '')) . '</code><strong>' . self::e((string) ($owner['component'] ?? '')) . '</strong><small>p' . (int) ($owner['priority'] ?? 10) . '</small></div>';
+            $html .= '<div class="owner"><span>' . self::e((string) ($owner['hook'] ?? '')) . '</span><code>' . self::e((string) ($owner['callback'] ?? '')) . '</code><strong>' . self::e((string) ($owner['component'] ?? '')) . '</strong><small>p' . (int) ($owner['priority'] ?? 10) . '</small></div>';
         }
-        if ($ownershipHtml === '') $ownershipHtml = '<div class="empty">No inspectable callbacks found for the active/recent hooks.</div>';
 
-        $compatHtml = '';
+        return $html === '' ? '<div class="empty">No inspectable callbacks found for the active/recent hooks.</div>' : $html;
+    }
+
+    /** @param array<string,mixed> $compat */
+    private static function compatibilityHtml(array $compat): string
+    {
+        $html = '';
         foreach ((array) ($compat['issues'] ?? []) as $issue) {
-            $severity = self::e((string) ($issue['severity'] ?? 'info'));
-            $compatHtml .= '<div class="compat ' . $severity . '"><span>' . strtoupper($severity) . '</span><strong>' . self::e((string) ($issue['plugin'] ?? '')) . '</strong><p>' . self::e((string) ($issue['message'] ?? '')) . '</p></div>';
+            $severity = (string) ($issue['severity'] ?? 'info');
+            if (! in_array($severity, ['info', 'warning', 'error'], true)) {
+                $severity = 'info';
+            }
+            $html .= '<div class="compat ' . $severity . '"><span>' . self::e(strtoupper($severity)) . '</span><strong>' . self::e((string) ($issue['plugin'] ?? '')) . '</strong><p>' . self::e((string) ($issue['message'] ?? '')) . '</p></div>';
         }
-        if ($compatHtml === '') $compatHtml = '<div class="empty">No dependency/version conflicts detected from declared plugin metadata.</div>';
 
-        $queryHtml = '';
+        return $html === '' ? '<div class="empty">No dependency/version conflicts detected from declared plugin metadata.</div>' : $html;
+    }
+
+    /** @param array<string,mixed> $db */
+    private static function queriesHtml(array $db): string
+    {
+        $html = '';
         foreach ((array) ($db['queries'] ?? []) as $query) {
-            $queryHtml .= '<div class="query"><div><code>' . self::e((string) ($query['sql'] ?? '')) . '</code><small>' . self::e((string) ($query['caller'] ?? '')) . '</small></div><span>' . (isset($query['seconds']) ? number_format((float) $query['seconds'] * 1000, 2) . 'ms' : '') . '</span></div>';
+            $html .= '<div class="query"><div><code>' . self::e((string) ($query['sql'] ?? '')) . '</code><small>' . self::e((string) ($query['caller'] ?? '')) . '</small></div><span>' . (isset($query['seconds']) ? number_format((float) $query['seconds'] * 1000, 2) . 'ms' : '') . '</span></div>';
         }
-        if ($queryHtml === '') $queryHtml = '<div class="empty">Enable <code>SAVEQUERIES</code> in development to include recent queries.</div>';
 
-        $wooHtml = empty($woo['active']) ? '<div class="empty">WooCommerce is not active/detected.</div>' : self::rows([
+        return $html === '' ? '<div class="empty">Enable <code>SAVEQUERIES</code> in development to include recent queries.</div>' : $html;
+    }
+
+    /** @param array<string,mixed> $woo */
+    private static function wooHtml(array $woo): string
+    {
+        if (empty($woo['active'])) {
+            return '<div class="empty">WooCommerce is not active/detected.</div>';
+        }
+
+        return self::rows([
             'Version' => $woo['version'] ?? '',
             'wc-ajax' => $woo['ajax_endpoint'] ?? '',
             'HPOS' => isset($woo['hpos']) && $woo['hpos'] !== null ? ($woo['hpos'] ? 'Enabled' : 'Disabled') : 'Unknown',
@@ -178,8 +317,12 @@ final class Renderer
             'Cart page' => $woo['cart_page'] ?? null,
             'Account page' => $woo['account_page'] ?? null,
         ]);
+    }
 
-        $envRows = [
+    /** @param array<string,mixed> $environment @return array<string,mixed> */
+    private static function environmentRows(array $environment): array
+    {
+        return [
             'WordPress' => $environment['wordpress'] ?? 'unknown',
             'PHP' => $environment['php'] ?? PHP_VERSION,
             'Environment' => $environment['environment_type'] ?? 'unknown',
@@ -191,7 +334,12 @@ final class Renderer
             'SAVEQUERIES' => $environment['savequeries'] ?? false,
             'Theme' => is_array($environment['theme'] ?? null) ? (($environment['theme']['name'] ?? '') . ' ' . ($environment['theme']['version'] ?? '')) : '',
         ];
-        $requestRows = [
+    }
+
+    /** @param array<string,mixed> $request @return array<string,mixed> */
+    private static function requestRows(array $request): array
+    {
+        return [
             'Method' => $request['method'] ?? '',
             'URI' => $request['uri'] ?? '',
             'AJAX' => $request['ajax'] ?? false,
@@ -201,25 +349,26 @@ final class Renderer
             'Cron' => $request['cron'] ?? false,
             'CLI' => $request['cli'] ?? false,
         ];
+    }
 
-        $ai = self::aiPayload($error, $context, $frames, $solutions);
-        $activeHook = end($hooks['active']) ?: (($hooks['recent'] !== []) ? end($hooks['recent'])['name'] ?? '—' : '—');
+    /** @param array<string,mixed> $hooks */
+    private static function activeHook(array $hooks): string
+    {
+        $activeHooks = (array) ($hooks['active'] ?? []);
+        $activeHook = $activeHooks !== [] ? (string) end($activeHooks) : '';
+        if ($activeHook !== '') {
+            return $activeHook;
+        }
 
-        return '<!doctype html><html' . Settings::htmlClass() . '><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' . self::e($error->type) . ' — WP Aware Errors</title>' . self::styles() . '</head><body><main class="shell">'
-            . '<header class="top"><div><div class="eyebrow">WP Aware Errors · ' . self::e((string) ($installation['label'] ?? 'Unknown')) . ' · v' . self::e((string) ($installation['version'] ?? '')) . '</div><h1>' . self::e($error->type) . '</h1><p class="message">' . self::e($error->message) . '</p></div><div class="top-actions"><button id="copy-ai">Copy AI context</button><button data-copy="' . self::e($error->file . ':' . $error->line) . '">Copy location</button></div></header>'
-            . '<section class="summary"><div><span>Likely source</span><strong>' . self::e((string) ($source['label'] ?? 'Unknown')) . '</strong><small>' . self::e((string) ($source['kind'] ?? 'unknown')) . '</small></div><div><span>Location</span><strong>' . self::e(FrameClassifier::relative($error->file)) . ':' . $error->line . '</strong><small>' . self::e((string) ($installation['mode'] ?? '')) . '</small></div><div><span>Current hook</span><strong>' . self::e((string) $activeHook) . '</strong><small>' . self::e((string) ($request['rest_route'] ?: $request['ajax_action'] ?: '')) . '</small></div></section>'
-            . '<section class="panel"><div class="panel-head"><h2>Code</h2><span>' . self::e(FrameClassifier::relative($error->file)) . '</span></div><div class="code">' . $codeHtml . '</div></section>'
-            . '<section class="grid"><div class="panel"><div class="panel-head"><h2>Solutions</h2><span>Provider-based</span></div><div class="panel-body">' . $solutionsHtml . '</div></div><div class="panel"><div class="panel-head"><h2>Compatibility intelligence</h2><span>WP / PHP / dependencies / Woo</span></div><div class="panel-body">' . $compatHtml . '</div></div></section>'
-            . '<section class="panel"><div class="panel-head"><h2>Stack trace</h2><span>Component ownership attached to each frame</span></div><div class="frames">' . $framesHtml . '</div></section>'
-            . '<section class="grid"><div class="panel"><div class="panel-head"><h2>Hook argument inspection</h2><span>Sanitised snapshots</span></div><div class="panel-body">' . $hookHtml . '</div></div><div class="panel"><div class="panel-head"><h2>Hook callback ownership</h2><span>Query Monitor-style component attribution</span></div><div class="panel-body ownership">' . $ownershipHtml . '</div></div></section>'
-            . '<section class="grid"><div class="panel"><div class="panel-head"><h2>Request / route</h2></div><div class="panel-body kv">' . self::rows($requestRows) . '<details><summary>GET / POST / REST params / headers</summary><pre>' . self::e(self::json(['query' => $request['query'] ?? [], 'post' => $request['post'] ?? [], 'rest_params' => $request['rest_params'] ?? [], 'headers' => $request['headers'] ?? []])) . '</pre></details></div></div><div class="panel"><div class="panel-head"><h2>WooCommerce</h2></div><div class="panel-body kv">' . $wooHtml . '</div></div></section>'
-            . '<section class="grid"><div class="panel"><div class="panel-head"><h2>Environment</h2></div><div class="panel-body kv">' . self::rows($envRows) . '</div></div><div class="panel"><div class="panel-head"><h2>Recent database queries</h2></div><div class="panel-body queries">' . $queryHtml . '</div></div></section>'
-            . '<footer>Error history is stored locally under Tools → WP Aware Errors. Never expose this renderer publicly; production display requires explicit opt-in.</footer></main>'
-            . '<script>window.__wpAwarePayload=' . json_encode($ai, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) . ';document.addEventListener("click",async(e)=>{const b=e.target.closest("[data-copy]");if(b){await navigator.clipboard.writeText(b.dataset.copy||"");const t=b.textContent;b.textContent="Copied";setTimeout(()=>b.textContent=t,900)}});document.getElementById("copy-ai")?.addEventListener("click",async(e)=>{await navigator.clipboard.writeText(window.__wpAwarePayload||"");const b=e.currentTarget;const t=b.textContent;b.textContent="Copied";setTimeout(()=>b.textContent=t,900)});</script></body></html>';
+        $recentHooks = (array) ($hooks['recent'] ?? []);
+        $lastHook = $recentHooks !== [] ? end($recentHooks) : null;
+        $activeHook = is_array($lastHook) ? (string) ($lastHook['name'] ?? '') : '';
+
+        return $activeHook === '' ? '—' : $activeHook;
     }
 
     /** @param array<string,mixed> $context @param list<array<string,mixed>> $frames @param list<array{title:string,description:string,action:string}> $solutions */
-    private static function aiPayload(ExceptionData $error, array $context, array $frames, array $solutions): string
+    private static function aiPayload(ExceptionData $error, array $context, array $frames, array $solutions, string $reference = ''): string
     {
         $environment = (array) ($context['environment'] ?? []);
         $hooks = (array) ($context['hooks'] ?? []);
@@ -229,16 +378,17 @@ final class Renderer
         $installation = (array) ($context['installation'] ?? []);
         $lines = [
             '# WP Aware Errors context','',
-            '**Error:** ' . $error->type . ': ' . $error->message,
+            '**Error:** ' . $error->type . ': ' . (string) Sanitizer::value('message', $error->message),
             '**Location:** ' . FrameClassifier::relative($error->file) . ':' . $error->line,
             '**Likely source:** ' . ($source['label'] ?? 'Unknown'),
             '**Installation:** ' . ($installation['label'] ?? 'Unknown') . ' (' . ($installation['mode'] ?? '') . ')',
             '**WordPress:** ' . ($environment['wordpress'] ?? 'unknown'),
             '**PHP:** ' . ($environment['php'] ?? PHP_VERSION),
             '**Environment:** ' . ($environment['environment_type'] ?? 'unknown'),
+            '**Reference:** ' . $reference,
             '**AJAX action:** ' . ($request['ajax_action'] ?? ''),
             '**REST route:** ' . ($request['rest_route'] ?? ''),
-            '**Hook stack:** ' . implode(' > ', (array) ($hooks['active'] ?? [])),
+            '**Hook stack:** ' . implode(' > ', array_slice((array) ($hooks['active'] ?? []), -10)),
         ];
         if (! empty($woo['active'])) $lines[] = '**WooCommerce:** ' . ($woo['version'] ?? 'unknown') . ' · HPOS ' . (($woo['hpos'] ?? null) === true ? 'enabled' : (($woo['hpos'] ?? null) === false ? 'disabled' : 'unknown'));
         $lines[] = '';
@@ -247,7 +397,7 @@ final class Renderer
         if ($solutions !== []) {
             $lines[] = '';
             $lines[] = '## Suggested checks';
-            foreach ($solutions as $solution) $lines[] = '- **' . $solution['title'] . ':** ' . $solution['action'];
+            foreach ($solutions as $solution) $lines[] = '- **' . Sanitizer::text((string) $solution['title']) . ':** ' . Sanitizer::text((string) $solution['action']);
         }
         $recent = (array) ($hooks['recent'] ?? []);
         if ($recent !== []) {
@@ -273,7 +423,13 @@ final class Renderer
 
     private static function json(mixed $value): string
     {
-        return (string) json_encode($value, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        $json = json_encode(
+            $value,
+            JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
+                | JSON_INVALID_UTF8_SUBSTITUTE | JSON_PARTIAL_OUTPUT_ON_ERROR
+        );
+
+        return $json === false ? '"[unencodable value]"' : $json;
     }
     private static function e(string $value): string { return htmlspecialchars($value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'); }
 
@@ -281,7 +437,7 @@ final class Renderer
     {
         return <<<'HTML'
 <style>
-:root{color-scheme:dark;--bg:#0b0d10;--panel:#11151a;--line:#252b33;--text:#eef2f7;--muted:#8e99a8;--accent:#ff5a36;--good:#41d6a3;--warn:#f3b73f;--bad:#ff6678}*{box-sizing:border-box}html,body{margin:0;padding:0;width:100%;max-width:none;min-height:100%;min-height:100vh;min-height:100dvh;background:var(--bg)}body{color:var(--text);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.shell{width:100%;max-width:none;min-height:100vh;min-height:100dvh;margin:0;padding:32px 40px;display:flex;flex-direction:column}.top{display:flex;justify-content:space-between;gap:24px;align-items:flex-start;margin-bottom:28px}.eyebrow{text-transform:uppercase;letter-spacing:.14em;font-size:11px;color:var(--accent);font-weight:800}.top h1{font-size:20px;margin:8px 0 4px}.message{font-size:30px;line-height:1.15;max-width:none;margin:0;font-weight:700;letter-spacing:-.025em}.top-actions{display:flex;gap:8px;flex-wrap:wrap}button,.frame-actions a{background:#171c22;border:1px solid #303842;color:#dce3eb;border-radius:8px;padding:8px 11px;text-decoration:none;font:inherit;cursor:pointer}.top-actions button:first-child{background:var(--accent);border-color:var(--accent);color:white}.summary{display:grid;grid-template-columns:1fr 2fr 1fr;border:1px solid var(--line);border-radius:13px;overflow:hidden;margin-bottom:18px;background:var(--panel)}.summary>div{padding:16px 18px;border-right:1px solid var(--line);min-width:0}.summary>div:last-child{border:0}.summary span,.summary small{display:block;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.07em}.summary strong{display:block;margin:4px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.panel{border:1px solid var(--line);background:var(--panel);border-radius:13px;overflow:hidden;margin-bottom:18px}.panel-head{display:flex;justify-content:space-between;gap:14px;align-items:center;padding:13px 17px;border-bottom:1px solid var(--line);color:var(--muted)}.panel-head h2{font-size:13px;color:#fff;margin:0;text-transform:uppercase;letter-spacing:.08em}.panel-body{padding:17px}.pad{padding:17px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}.grid>.panel{margin-bottom:18px}.code{font:13px/1.65 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow:auto;padding:10px 0}.code-line{display:grid;grid-template-columns:65px minmax(700px,1fr);padding:0 16px}.code-line .ln{color:#5e6976;text-align:right;padding-right:18px;user-select:none}.code-line code{white-space:pre}.code-line.active{background:rgba(255,90,54,.12);box-shadow:inset 3px 0 var(--accent)}.code-line.active .ln{color:var(--accent);font-weight:800}.frames{padding:6px}.frame{display:grid;grid-template-columns:42px minmax(0,1fr) auto auto;gap:12px;align-items:center;border-bottom:1px solid #1d232a;padding:11px}.frame:last-child{border:0}.frame.internal{opacity:.46}.frame.internal:hover{opacity:1}.frame-no{color:#67717d;font-family:ui-monospace,monospace}.frame-call{font-weight:700;overflow:hidden;text-overflow:ellipsis}.frame-path{color:var(--muted);font:12px ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.badge{font-size:11px;padding:4px 8px;border-radius:999px;background:#1b222a;border:1px solid #2d3742;white-space:nowrap}.app-frame .badge{border-color:rgba(65,214,163,.35);color:var(--good)}.frame-actions{display:flex;gap:6px}.frame-actions a,.frame-actions button{padding:5px 7px;font-size:11px}.solution{padding:12px 0;border-bottom:1px solid #20262d}.solution:first-child{padding-top:0}.solution:last-child{border:0;padding-bottom:0}.solution strong{display:block;color:#fff}.solution p{margin:4px 0;color:#c8d0da}.solution small{display:block;color:var(--good)}.compat{border:1px solid #2b333c;border-radius:9px;padding:10px 12px;margin-bottom:9px}.compat span{font-size:10px;letter-spacing:.1em;color:var(--muted)}.compat strong{display:block;margin-top:2px}.compat p{margin:4px 0 0;color:#cbd3dc}.compat.warning{border-color:rgba(243,183,63,.35)}.compat.warning span{color:var(--warn)}.compat.error{border-color:rgba(255,102,120,.38)}.compat.error span{color:var(--bad)}.hook{border-bottom:1px solid #20262d;padding:8px 0}.hook summary{display:flex;justify-content:space-between;gap:12px}.hook summary span{font-weight:700}.hook summary small{color:var(--muted)}.hook pre{margin-bottom:3px}.owner{display:grid;grid-template-columns:minmax(0,.8fr) minmax(0,1.2fr) minmax(0,1fr) auto;gap:10px;padding:8px 0;border-bottom:1px solid #20262d;align-items:center}.owner span{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.owner code{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.owner strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.owner small{color:var(--muted);text-align:right}.kv>div{display:grid;grid-template-columns:155px minmax(0,1fr);gap:12px;padding:8px 0;border-bottom:1px solid #1f252c}.kv>div:last-of-type{border:0}.kv span{color:var(--muted)}.kv strong{font-weight:600;overflow-wrap:anywhere}details{margin-top:12px}summary{cursor:pointer;color:#cfd7df}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.55 ui-monospace,monospace;background:#0d1014;border:1px solid #20262d;border-radius:8px;padding:12px}.query{display:grid;grid-template-columns:minmax(0,1fr) 70px;gap:12px;padding:9px 0;border-bottom:1px solid #1f252c}.query code{display:block;font:12px/1.4 ui-monospace,monospace;overflow-wrap:anywhere}.query small{display:block;color:#65707d;margin-top:4px}.query span{color:var(--muted);text-align:right}.empty{color:var(--muted)}.preview-banner{display:flex;justify-content:space-between;align-items:center;gap:12px 18px;flex-wrap:wrap;margin:-4px 0 22px;padding:12px 16px;border:1px solid rgba(255,90,54,.45);border-radius:12px;background:#2a1a12;color:#ffd7cc}.preview-banner strong{color:#fff}.preview-banner a{color:#fff;font-weight:700;text-decoration:none;border-bottom:1px solid rgba(255,255,255,.4)}footer{color:#687380;text-align:center;padding:8px 0 12px;margin-top:auto}footer code{color:#a8b2be}html.theme-light{color-scheme:light;--bg:#f6f4f1;--panel:#ffffff;--line:#e6e0d8;--text:#1d1a17;--muted:#6f6862;--accent:#e24a28;--good:#0c7d5b;--warn:#9a6700;--bad:#c4233a}html.theme-light button,html.theme-light .frame-actions a{background:#fff;border-color:#ddd6cc;color:#1d1a17}html.theme-light .top-actions button:first-child{background:var(--accent);border-color:var(--accent);color:#fff}html.theme-light .panel-head h2,html.theme-light .solution strong{color:#1d1a17}html.theme-light .code-line .ln,html.theme-light .frame-no{color:#8d867e}html.theme-light .frame{border-bottom-color:#efeae4}html.theme-light .badge{background:#f3efe9;border-color:#e4ddd4;color:#3f3a36}html.theme-light .app-frame .badge{border-color:rgba(12,125,91,.35);color:var(--good)}html.theme-light .solution,html.theme-light .hook,html.theme-light .owner{border-bottom-color:#efeae4}html.theme-light .solution p,html.theme-light .compat p{color:#3f3a36}html.theme-light .compat{border-color:#e4ddd4}html.theme-light .kv>div,html.theme-light .query{border-bottom-color:#efeae4}html.theme-light pre{background:#faf8f6;border-color:#e6e0d8;color:#1d1a17}html.theme-light summary{color:#3f3a36}html.theme-light .query small{color:#8d867e}html.theme-light footer{color:#8d867e}html.theme-light footer code{color:#5c564f}html.theme-light .preview-banner{background:#fff4ee;border-color:rgba(226,74,40,.35);color:#6b3a28}html.theme-light .preview-banner strong,html.theme-light .preview-banner a{color:#9a3412;border-bottom-color:rgba(154,52,18,.35)}@media(max-width:940px){.shell{padding:20px}.top{display:block}.top-actions{margin-top:18px}.message{font-size:23px}.summary,.grid{grid-template-columns:1fr}.summary>div{border-right:0;border-bottom:1px solid var(--line)}.frame{grid-template-columns:34px minmax(0,1fr)}.frame .badge,.frame-actions{grid-column:2}.owner{grid-template-columns:1fr}.owner small{text-align:left}.code-line{grid-template-columns:50px minmax(650px,1fr)}}
+:root{color-scheme:dark;--bg:#0b0d10;--panel:#11151a;--line:#252b33;--text:#eef2f7;--muted:#8e99a8;--accent:#ff5a36;--accent-strong:#c2410c;--good:#41d6a3;--warn:#f3b73f;--bad:#ff6678}*{box-sizing:border-box}html,body{margin:0;padding:0;width:100%;max-width:none;min-height:100%;min-height:100vh;min-height:100dvh;background:var(--bg)}body{color:var(--text);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.shell{width:100%;max-width:none;min-height:100vh;min-height:100dvh;margin:0;padding:32px 40px;display:flex;flex-direction:column}.top{display:flex;justify-content:space-between;gap:24px;align-items:flex-start;margin-bottom:28px}.eyebrow{text-transform:uppercase;letter-spacing:.14em;font-size:11px;color:var(--accent);font-weight:800}.top h1{font-size:20px;margin:8px 0 4px}.message{font-size:30px;line-height:1.15;max-width:none;margin:0;font-weight:700;letter-spacing:-.025em}.top-actions{display:flex;gap:8px;flex-wrap:wrap}button,.frame-actions a{background:#171c22;border:1px solid #303842;color:#dce3eb;border-radius:8px;padding:8px 11px;text-decoration:none;font:inherit;cursor:pointer}.top-actions button:first-child{background:var(--accent-strong);border-color:var(--accent-strong);color:#fff}button:focus-visible,.frame-actions a:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.summary{display:grid;grid-template-columns:1fr 2fr 1fr;border:1px solid var(--line);border-radius:13px;overflow:hidden;margin-bottom:18px;background:var(--panel)}.summary>div{padding:16px 18px;border-right:1px solid var(--line);min-width:0}.summary>div:last-child{border:0}.summary span,.summary small{display:block;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.07em}.summary strong{display:block;margin:4px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.panel{border:1px solid var(--line);background:var(--panel);border-radius:13px;overflow:hidden;margin-bottom:18px}.panel-head{display:flex;justify-content:space-between;gap:14px;align-items:center;padding:13px 17px;border-bottom:1px solid var(--line);color:var(--muted)}.panel-head h2{font-size:13px;color:#fff;margin:0;text-transform:uppercase;letter-spacing:.08em}.panel-body{padding:17px}.pad{padding:17px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}.grid>.panel{margin-bottom:18px}.code{font:13px/1.65 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow:auto;padding:10px 0}.code-line{display:grid;grid-template-columns:65px minmax(700px,1fr);padding:0 16px}.code-line .ln{color:#7e8996;text-align:right;padding-right:18px;user-select:none}.code-line code{white-space:pre}.code-line.active{background:rgba(255,90,54,.12);box-shadow:inset 3px 0 var(--accent)}.code-line.active .ln{color:var(--accent);font-weight:800}.frames{padding:6px}.frame{display:grid;grid-template-columns:42px minmax(0,1fr) auto auto;gap:12px;align-items:center;border-bottom:1px solid #1d232a;padding:11px}.frame:last-child{border:0}.frame.internal{opacity:.7}.frame.internal:hover{opacity:1}.frame-no{color:var(--muted);font-family:ui-monospace,monospace}.frame-call{font-weight:700;overflow:hidden;text-overflow:ellipsis}.frame-path{color:var(--muted);font:12px ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.badge{font-size:11px;padding:4px 8px;border-radius:999px;background:#1b222a;border:1px solid #2d3742;white-space:nowrap}.app-frame .badge{border-color:rgba(65,214,163,.35);color:var(--good)}.frame-actions{display:flex;gap:6px}.frame-actions a,.frame-actions button{padding:5px 7px;font-size:11px}.solution{padding:12px 0;border-bottom:1px solid #20262d}.solution:first-child{padding-top:0}.solution:last-child{border:0;padding-bottom:0}.solution strong{display:block;color:#fff}.solution p{margin:4px 0;color:#c8d0da}.solution small{display:block;color:var(--good)}.compat{border:1px solid #2b333c;border-radius:9px;padding:10px 12px;margin-bottom:9px}.compat span{font-size:10px;letter-spacing:.1em;color:var(--muted)}.compat strong{display:block;margin-top:2px}.compat p{margin:4px 0 0;color:#cbd3dc}.compat.warning{border-color:rgba(243,183,63,.35)}.compat.warning span{color:var(--warn)}.compat.error{border-color:rgba(255,102,120,.38)}.compat.error span{color:var(--bad)}.hook{border-bottom:1px solid #20262d;padding:8px 0}.hook summary{display:flex;justify-content:space-between;gap:12px}.hook summary span{font-weight:700}.hook summary small{color:var(--muted)}.hook pre{margin-bottom:3px}.owner{display:grid;grid-template-columns:minmax(0,.8fr) minmax(0,1.2fr) minmax(0,1fr) auto;gap:10px;padding:8px 0;border-bottom:1px solid #20262d;align-items:center}.owner span{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.owner code{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.owner strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.owner small{color:var(--muted);text-align:right}.kv>div{display:grid;grid-template-columns:155px minmax(0,1fr);gap:12px;padding:8px 0;border-bottom:1px solid #1f252c}.kv>div:last-of-type{border:0}.kv span{color:var(--muted)}.kv strong{font-weight:600;overflow-wrap:anywhere}details{margin-top:12px}summary{cursor:pointer;color:#cfd7df}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.55 ui-monospace,monospace;background:#0d1014;border:1px solid #20262d;border-radius:8px;padding:12px}.query{display:grid;grid-template-columns:minmax(0,1fr) 70px;gap:12px;padding:9px 0;border-bottom:1px solid #1f252c}.query code{display:block;font:12px/1.4 ui-monospace,monospace;overflow-wrap:anywhere}.query small{display:block;color:var(--muted);margin-top:4px}.query span{color:var(--muted);text-align:right}.empty{color:var(--muted)}.preview-banner{display:flex;justify-content:space-between;align-items:center;gap:12px 18px;flex-wrap:wrap;margin:-4px 0 22px;padding:12px 16px;border:1px solid rgba(255,90,54,.45);border-radius:12px;background:#2a1a12;color:#ffd7cc}.preview-banner strong{color:#fff}.preview-banner a{color:#fff;font-weight:700;text-decoration:none;border-bottom:1px solid rgba(255,255,255,.4)}footer{color:var(--muted);text-align:center;padding:8px 0 12px;margin-top:auto}.screen-reader-text{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}footer code{color:#a8b2be}html.theme-light{color-scheme:light;--bg:#f6f4f1;--panel:#ffffff;--line:#e6e0d8;--text:#1d1a17;--muted:#6f6862;--accent:#c2410c;--accent-strong:#c2410c;--good:#0c7d5b;--warn:#9a6700;--bad:#c4233a}html.theme-light button,html.theme-light .frame-actions a{background:#fff;border-color:#ddd6cc;color:#1d1a17}html.theme-light .top-actions button:first-child{background:var(--accent-strong);border-color:var(--accent-strong);color:#fff}html.theme-light .panel-head h2,html.theme-light .solution strong{color:#1d1a17}html.theme-light .code-line .ln,html.theme-light .frame-no{color:#6f6862}html.theme-light .frame{border-bottom-color:#efeae4}html.theme-light .badge{background:#f3efe9;border-color:#e4ddd4;color:#3f3a36}html.theme-light .app-frame .badge{border-color:rgba(12,125,91,.35);color:var(--good)}html.theme-light .solution,html.theme-light .hook,html.theme-light .owner{border-bottom-color:#efeae4}html.theme-light .solution p,html.theme-light .compat p{color:#3f3a36}html.theme-light .compat{border-color:#e4ddd4}html.theme-light .kv>div,html.theme-light .query{border-bottom-color:#efeae4}html.theme-light pre{background:#faf8f6;border-color:#e6e0d8;color:#1d1a17}html.theme-light summary{color:#3f3a36}html.theme-light .query small{color:var(--muted)}html.theme-light footer{color:var(--muted)}html.theme-light footer code{color:#5c564f}html.theme-light .preview-banner{background:#fff4ee;border-color:rgba(226,74,40,.35);color:#6b3a28}html.theme-light .preview-banner strong,html.theme-light .preview-banner a{color:#9a3412;border-bottom-color:rgba(154,52,18,.35)}@media(max-width:940px){.shell{padding:20px}.top{display:block}.top-actions{margin-top:18px}.message{font-size:23px}.summary,.grid{grid-template-columns:1fr}.summary>div{border-right:0;border-bottom:1px solid var(--line)}.frame{grid-template-columns:34px minmax(0,1fr)}.frame .badge,.frame-actions{grid-column:2}.owner{grid-template-columns:1fr}.owner small{text-align:left}.code-line{grid-template-columns:50px minmax(650px,1fr)}}
 </style>
 HTML;
     }

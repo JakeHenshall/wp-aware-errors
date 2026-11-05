@@ -4,13 +4,8 @@ declare(strict_types=1);
 
 namespace Hensh\WpAwareErrors;
 
-final class NullCallProvider extends MessageSolutionProvider
+final class NullCallProvider implements SolutionProvider
 {
-    protected function needles(): array
-    {
-        return ['member function', 'attempt to read property', 'attempt to assign property', 'of non-object'];
-    }
-
     public function supports(ExceptionData $error, array $context): bool
     {
         $message = strtolower($error->message);
@@ -20,6 +15,7 @@ final class NullCallProvider extends MessageSolutionProvider
         if (! str_contains($message, 'on null')) {
             return false;
         }
+
         return str_contains($message, 'member function') || str_contains($message, 'property');
     }
 

@@ -4,18 +4,14 @@ declare(strict_types=1);
 
 namespace Hensh\WpAwareErrors;
 
-use ReflectionFunction;
-use ReflectionMethod;
-use Throwable;
-
-final class MissingClassProvider extends MessageSolutionProvider
+final class MissingClassProvider implements SolutionProvider
 {
-    protected function needles(): array { return ['class "', 'class \'', 'not found']; }
     public function supports(ExceptionData $error, array $context): bool
     {
-        $m = strtolower($error->message);
-        return str_contains($m, 'class') && str_contains($m, 'not found');
+        $message = strtolower($error->message);
+        return str_contains($message, 'class') && str_contains($message, 'not found');
     }
+
     public function provide(ExceptionData $error, array $context): array
     {
         return [[
